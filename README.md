@@ -4,5 +4,7 @@ I chose to keep the numerical variables (even though I'm not sure if there were 
 difference to do the correlation. I replaced missing values with the median, and used correlation to pick just the 50 "best" variables. Once again, I'm not sure
 if this is the best aproach, but this is what I was able to do giving my computational power. I think that either way, these 50 variables could be used for modeling,
 and with Lasso and Ridge we could reduce even more the number of variables, so it's easier for us to explain what is going on. I also added on the document, how we can
-get to that table he is expecting from us with 2 columns id and loss. I saved the test ids in a different file so aster finding the loss for each row we can just
+get to that table he is expecting from us with 2 columns id and loss. I saved the test ids in a different file so after finding the loss for each row we can just
 concatenate everything since they are in the same order.
+This is what I'm talking about:
+<img width="797" height="268" alt="image" src="https://github.com/user-attachments/assets/0ec25a91-88dd-4ca1-be58-f92b9f045464" />
