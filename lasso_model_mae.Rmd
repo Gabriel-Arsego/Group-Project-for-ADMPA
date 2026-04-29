@@ -1,0 +1,71 @@
+---
+title: "Lasso Model MAE for ADMPA Group Project"
+author: "Kight Pruszynski"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Lasso regression using glmnet
+# Target: loss
+# Feature set: Gabriel’s cleaned dataset (50 features)
+# Tuning metric: MAE (aligned with project evaluation)
+```
+
+
+```{r}
+library(glmnet)
+set.seed(123)
+```
+
+### Load & prepare data
+```{r}
+train <- read.csv("cleaned_train_final.csv")
+train_x <- as.matrix(train[,-1])
+y <- train$loss
+```
+
+```{r}
+## Exploratory Lasso coefficient path (for visualization, not necessary to run)
+fit.lasso <- glmnet(train_x, y, alpha=1) 
+plot(fit.lasso, xvar="lambda")
+```
+
+### Train Lasso model (cross-validation)
+```{r}
+cv_model <- cv.glmnet(train_x, y, alpha = 1, type.measure = "mae") ## Lasso (alpha = 1)
+plot(cv_model)
+```
+
+### Model evaluation, optimal lambda identification, and interpretation
+```{r}
+cv_model$lambda.min ## Identifying optimal lambda
+cv_model$lambda.1se ## Simpler lambda using 1-SE rule
+min(cv_model$cvm) ## Evaluating performance
+
+sum(coef(cv_model, s = "lambda.min") != 0)
+sum(coef(cv_model, s = "lambda.1se") != 0)
+
+lasso_coef <- coef(cv_model, s = "lambda.min") 
+lasso_coef
+```
+
+### Prediction File
+
+The trained cross-validated Lasso model is used to generate predictions for the cleaned test dataset. The output file contains predicted `loss` values only, as test IDs are managed separately.
+
+```{r}
+test <- read.csv("cleaned_test_final.csv")
+test_x <- as.matrix(test)
+stopifnot(all(colnames(train_x) == colnames(test_x))) ## Check train and test column names match
+
+predictions <- predict(cv_model, s="lambda.min", newx=test_x)
+
+output <- data.frame(loss = as.numeric(predictions))
+write.csv(output, "lasso_predictions.csv", row.names = FALSE)
+```
+
