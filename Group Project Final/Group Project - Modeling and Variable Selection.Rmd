@@ -1,0 +1,192 @@
+---
+title: "Group Project - Modeling and Variable Selection"
+author: "Gabriel Arsego"
+date: "2026-05-01"
+output: html_document
+---
+Loading the datasets:
+```{r}
+library(data.table)
+library(caret)
+library(glmnet)
+
+set.seed(123)
+
+setwd("C:/Users/arseg/Desktop")
+
+train_clean <- fread("train_clean_final.csv")
+test_clean <- fread("test_clean_final.csv")
+
+train_model <- as.data.frame(train_clean)
+test_model <- as.data.frame(test_clean)
+```
+Final confirmation before modeling:
+```{r}
+sum(is.na(train_model))
+sum(is.na(test_model))
+
+names(train_model)[!sapply(train_model, is.numeric)]
+names(test_model)[!sapply(test_model, is.numeric)]
+
+"loss" %in% names(train_model)
+```
+```{r}
+train_model$f531 <- NULL
+```
+Creating a training and a validation set:
+```{r}
+index <- createDataPartition(train_model$loss, p = 0.7, list = FALSE)
+
+training <- train_model[index, ]
+validation <- train_model[-index, ]
+
+dim(training)
+dim(validation)
+```
+Here I'm creating a baseline Linear Regression with the top 50 variables in correlation with "loss":
+```{r}
+# Identify predictor columns
+predictor_cols <- setdiff(names(training), "loss")
+
+# Calculate correlation between each predictor and loss
+correlations <- sapply(training[, predictor_cols], function(x) {
+  cor(x, training$loss, use = "complete.obs")
+})
+
+# Select top 50 predictors by absolute correlation
+top_features <- names(sort(abs(correlations), decreasing = TRUE))[1:50]
+
+top_features
+```
+Creating smaller training and validation datasets (so I can actually run this):
+```{r}
+training_small <- training[, c("loss", top_features)]
+
+validation_small <- validation[, c("loss", top_features)]
+```
+Running the Linear Regression:
+```{r}
+lm_model <- lm(loss ~ ., data = training_small)
+
+lm_pred <- predict(lm_model, newdata = validation_small)
+
+lm_results <- postResample(pred = lm_pred, obs = validation_small$loss)
+
+lm_results
+```
+Now I'll run Lasso Regression as Kight Pruszynski did:
+```{r}
+x_train <- as.matrix(training[, setdiff(names(training), "loss")])
+y_train <- training$loss
+
+x_val <- as.matrix(validation[, setdiff(names(validation), "loss")])
+y_val <- validation$loss
+```
+Running Lasso with cross-validation:
+```{r}
+set.seed(123)
+
+lasso_cv <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 1,
+  nfolds = 5
+)
+```
+Checking the best lambda:
+```{r}
+lasso_cv$lambda.min
+lasso_cv$lambda.1se
+```
+Predicting on validation data:
+```{r}
+lasso_pred <- predict(lasso_cv, s = "lambda.min", newx = x_val)
+
+lasso_results <- postResample(
+  pred = as.numeric(lasso_pred),
+  obs = y_val
+)
+
+lasso_results
+```
+Comparing Linear Regression and Lasso:
+```{r}
+model_results <- rbind(
+  Linear_Regression_Top50 = lm_results,
+  Lasso_All_Variables = lasso_results
+)
+
+model_results
+```
+Checking which variables Lasso selected:
+```{r}
+lasso_coef <- coef(lasso_cv, s = "lambda.min")
+
+lasso_coef_df <- data.frame(
+  variable = rownames(lasso_coef),
+  coefficient = as.numeric(lasso_coef)
+)
+
+selected_lasso_vars <- lasso_coef_df[lasso_coef_df$coefficient != 0, ]
+
+selected_lasso_vars <- selected_lasso_vars[selected_lasso_vars$variable != "(Intercept)", ]
+
+selected_lasso_vars
+
+nrow(selected_lasso_vars)
+```
+```{r}
+plot(lasso_cv$glmnet.fit, xvar = "norm", label = TRUE)
+```
+Predicting on the Cleaned Test Dataset:
+```{r}
+predictor_names <- setdiff(names(training), "loss")
+
+test_model_final <- test_model[, predictor_names, drop = FALSE]
+
+x_test <- as.matrix(test_model_final)
+
+test_pred <- predict(lasso_cv, s = "lambda.min", newx = x_test)
+
+test_pred <- as.numeric(test_pred)
+
+test_pred[test_pred < 0] <- 0
+```
+Number of predictions:
+```{r}
+length(test_pred)
+nrow(test_model_final)
+```
+```{r}
+test_ids <- fread("C:/Users/arseg/Desktop/test_ids.csv")
+```
+```{r}
+names(test_ids)
+head(test_ids)
+```
+```{r}
+test_id <- test_ids$id
+```
+```{r}
+length(test_id)
+length(test_pred)
+nrow(test_model_final)
+```
+```{r}
+group_project_loss_prediction <- data.frame(
+  id = test_id,
+  loss = test_pred
+)
+head(group_project_loss_prediction)
+names(group_project_loss_prediction)
+dim(group_project_loss_prediction)
+sum(is.na(group_project_loss_prediction))
+```
+```{r}
+write.csv(
+  group_project_loss_prediction,
+  "Group Project - Loss Prediction.csv",
+  row.names = FALSE
+)
+```
+
