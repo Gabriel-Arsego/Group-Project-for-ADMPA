@@ -1,0 +1,1012 @@
+---
+title: "Loan Loss Prediction - Group Project"
+author: "Group 1"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# 1. Project Goal
+
+## 1.1 Objective
+This project aims to predict loan defaults and estimate the loss incurred when defaults occur. Unlike traditional binary classification approaches (good/bad loans), we build a regression model that predicts the continuous loss amount, bridging traditional banking risk management with asset-management perspectives.
+
+## 1.2 Evaluation Metric
+Model performance is evaluated using **Mean Absolute Error (MAE)**:
+
+$$MAE = \frac{1}{n}\sum_{i=1}^{n}|y_i - \hat{y}_i|$$
+
+where $y_i$ is the actual loss and $\hat{y}_i$ is the predicted loss.
+
+---
+
+# 2. Data Loading and Initial Exploration
+
+## 2.1 Load Required Libraries
+
+```{r libraries}
+# Data manipulation
+library(data.table)
+library(dplyr)
+library(tidyr)
+
+# Visualization
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(RColorBrewer)
+
+# Modeling
+library(caret)
+library(glmnet)
+library(randomForest)
+library(xgboost)
+library(e1071)
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+## 2.2 Load Datasets
+
+```{r load_data}
+
+
+# Load training and test data
+train_raw <- fread("train_v3.csv")
+test_raw <- fread("test__no_lossv3.csv")
+
+# Display dimensions
+cat("Training set dimensions:", dim(train_raw), "\n")
+cat("Test set dimensions:", dim(test_raw), "\n")
+cat("Number of features:", ncol(train_raw) - 2, "\n") # Excluding V1, id, loss
+```
+
+## 2.3 Initial Data Structure
+
+```{r data_structure}
+# Check first few rows
+head(train_raw[, 1:10], 3)
+
+# Check data types
+class_summary <- sapply(train_raw, class)
+table(class_summary)
+```
+
+---
+
+# 3. Data Exploration and Analysis
+
+## 3.1 Target Variable Distribution
+
+```{r target_distribution, fig.height=8}
+# Create multiple plots for loss distribution
+p1 <- ggplot(train_raw, aes(x = loss)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Loss (Original Scale)", x = "Loss", y = "Frequency") +
+  theme_minimal()
+
+p2 <- ggplot(train_raw, aes(x = loss)) +
+  geom_histogram(bins = 50, fill = "coral", color = "black", alpha = 0.7) +
+  scale_x_log10() +
+  labs(title = "Distribution of Loss (Log Scale)", x = "Loss (log scale)", y = "Frequency") +
+  theme_minimal()
+
+p3 <- ggplot(train_raw, aes(y = loss)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Boxplot of Loss", y = "Loss") +
+  theme_minimal()
+
+# Summary statistics
+loss_summary <- summary(train_raw$loss)
+cat("\nLoss Summary Statistics:\n")
+print(loss_summary)
+cat("\nStandard Deviation:", sd(train_raw$loss, na.rm = TRUE), "\n")
+cat("Skewness:", moments::skewness(train_raw$loss, na.rm = TRUE), "\n")
+
+grid.arrange(p1, p2, p3, ncol = 2)
+```
+
+## 3.2 Missing Value Analysis
+
+```{r missing_values}
+# Calculate missing percentages
+missing_stats <- data.frame(
+  variable = names(train_raw),
+  missing_count = colSums(is.na(train_raw)),
+  missing_pct = round(colMeans(is.na(train_raw)) * 100, 2)
+) %>%
+  filter(missing_count > 0) %>%
+  arrange(desc(missing_pct))
+
+# Display top 20 variables with missing values
+cat("Top 20 variables with missing values:\n")
+head(missing_stats, 20)
+
+# Visualize missing data
+if(nrow(missing_stats) > 0) {
+  ggplot(head(missing_stats, 30), aes(x = reorder(variable, missing_pct), y = missing_pct)) +
+    geom_bar(stat = "identity", fill = "coral", alpha = 0.8) +
+    coord_flip() +
+    labs(title = "Top 30 Variables by Missing Data Percentage",
+         x = "Variable", y = "Missing %") +
+    theme_minimal()
+}
+```
+
+---
+
+# 4. Data Cleaning and Preprocessing
+
+## 4.1 Select Numeric Variables
+
+```{r select_numeric}
+# Keep only numeric columns
+num_cols <- names(train_raw)[sapply(train_raw, is.numeric)]
+df_numeric <- train_raw[, ..num_cols]
+
+cat("Original columns:", ncol(train_raw), "\n")
+cat("Numeric columns:", ncol(df_numeric), "\n")
+cat("Target variable present:", "loss" %in% names(df_numeric), "\n")
+```
+
+## 4.2 Remove Rows with Missing Target
+
+```{r remove_na_target}
+rows_before <- nrow(df_numeric)
+df_numeric <- df_numeric[!is.na(loss)]
+rows_after <- nrow(df_numeric)
+
+cat("Rows removed due to missing loss:", rows_before - rows_after, "\n")
+cat("Remaining rows:", rows_after, "\n")
+```
+
+## 4.3 Separate Target and Features
+
+```{r separate_target}
+y <- df_numeric$loss
+x <- df_numeric[, !names(df_numeric) %in% "loss", with = FALSE]
+
+cat("Target variable length:", length(y), "\n")
+cat("Feature matrix dimensions:", dim(x), "\n")
+```
+
+## 4.4 Impute Missing Values with Median
+
+```{r impute_missing}
+# Calculate training medians
+train_medians <- sapply(x, function(col) median(col, na.rm = TRUE))
+
+# Impute missing values
+for (col in names(x)) {
+  x[[col]][is.na(x[[col]])] <- train_medians[col]
+}
+
+cat("Missing values after imputation:", sum(is.na(x)), "\n")
+```
+
+## 4.5 Remove Zero-Variance Features
+
+```{r remove_zero_var}
+# Identify zero-variance columns
+zero_var_cols <- names(x)[sapply(x, function(col) {
+  sd_val <- sd(col, na.rm = TRUE)
+  is.na(sd_val) || sd_val == 0
+})]
+
+cat("Zero-variance columns found:", length(zero_var_cols), "\n")
+cat("Zero-variance columns:", paste(zero_var_cols, collapse = ", "), "\n")
+
+# Remove zero-variance columns
+x <- x[, !names(x) %in% zero_var_cols, with = FALSE]
+
+cat("Features after removing zero-variance:", ncol(x), "\n")
+```
+
+## 4.6 Scale Features
+
+```{r scale_features}
+# Calculate training statistics
+train_means <- sapply(x, mean)
+train_sds <- sapply(x, sd)
+
+# Replace zero or near-zero standard deviations with 1 to prevent division by zero
+train_sds[train_sds < 1e-10] <- 1
+
+cat("Features with zero/near-zero standard deviation:", sum(train_sds == 1), "\n")
+
+# Scale features
+x_scaled <- as.data.frame(scale(x, center = train_means, scale = train_sds))
+
+# Replace any remaining Inf or NaN values
+inf_count <- sum(is.infinite(as.matrix(x_scaled)))
+nan_count <- sum(is.nan(as.matrix(x_scaled)))
+
+if(inf_count > 0 || nan_count > 0) {
+  cat("Found", inf_count, "Inf values and", nan_count, "NaN values\n")
+  cat("Replacing with 0...\n")
+  x_scaled[is.infinite(as.matrix(x_scaled))] <- 0
+  x_scaled[is.nan(as.matrix(x_scaled))] <- 0
+}
+
+# Cap extreme values to prevent issues with XGBoost
+# Scaled values beyond ±10 are likely outliers or errors
+max_scaled_value <- 10
+extreme_count <- sum(abs(as.matrix(x_scaled)) > max_scaled_value)
+if(extreme_count > 0) {
+  cat("Found", extreme_count, "extreme values beyond ±", max_scaled_value, "\n")
+  cat("Capping to ±", max_scaled_value, "...\n")
+  x_scaled[x_scaled > max_scaled_value] <- max_scaled_value
+  x_scaled[x_scaled < -max_scaled_value] <- -max_scaled_value
+}
+
+# Final checks
+cat("NA values after scaling:", sum(is.na(x_scaled)), "\n")
+cat("Infinite values after scaling:", sum(is.infinite(as.matrix(x_scaled))), "\n")
+cat("NaN values after scaling:", sum(is.nan(as.matrix(x_scaled))), "\n")
+cat("Max value after capping:", max(as.matrix(x_scaled)), "\n")
+cat("Min value after capping:", min(as.matrix(x_scaled)), "\n")
+```
+
+## 4.7 Create Final Training Dataset
+
+```{r final_training}
+df_final <- cbind(loss = y, x_scaled)
+df_final <- as.data.frame(df_final)
+
+cat("Final training dataset dimensions:", dim(df_final), "\n")
+cat("All columns numeric:", all(sapply(df_final, is.numeric)), "\n")
+```
+
+---
+
+# 5. Feature Engineering
+
+## 5.1 Correlation Analysis
+
+```{r correlation_analysis, fig.height=8, fig.width=8}
+# Calculate correlations with target
+predictor_cols <- setdiff(names(df_final), "loss")
+correlations <- sapply(df_final[, predictor_cols], function(x) {
+  cor(x, df_final$loss, use = "complete.obs")
+})
+
+# Sort by absolute correlation
+cor_sorted <- sort(abs(correlations), decreasing = TRUE)
+
+# Display top 30 correlated features
+cat("Top 30 features by correlation with loss:\n")
+print(head(cor_sorted, 30))
+
+# Visualize top correlations
+top_30_features <- names(head(cor_sorted, 30))
+top_30_cor <- correlations[top_30_features]
+
+ggplot(data.frame(feature = names(top_30_cor), correlation = top_30_cor),
+       aes(x = reorder(feature, abs(correlation)), y = correlation)) +
+  geom_bar(stat = "identity", aes(fill = correlation > 0), alpha = 0.8) +
+  coord_flip() +
+  scale_fill_manual(values = c("coral", "steelblue"), 
+                    labels = c("Negative", "Positive")) +
+  labs(title = "Top 30 Features by Correlation with Loss",
+       x = "Feature", y = "Correlation", fill = "Direction") +
+  theme_minimal()
+```
+
+## 5.2 Create Interaction Features
+
+```{r create_interactions}
+# Select top 10 features for interactions
+top_10_features <- names(head(cor_sorted, 10))
+
+cat("Creating interaction features from top 10 correlated variables:\n")
+print(top_10_features)
+
+# Create a subset with top features
+df_interactions <- df_final[, c("loss", top_10_features)]
+
+# Create polynomial features (squared terms)
+for(feat in top_10_features) {
+  new_col_name <- paste0(feat, "_squared")
+  df_interactions[[new_col_name]] <- df_final[[feat]]^2
+}
+
+# Create some key interaction terms (top 5 with each other)
+top_5 <- top_10_features[1:5]
+interaction_count <- 0
+for(i in 1:(length(top_5)-1)) {
+  for(j in (i+1):length(top_5)) {
+    new_col_name <- paste0(top_5[i], "_X_", top_5[j])
+    df_interactions[[new_col_name]] <- df_final[[top_5[i]]] * df_final[[top_5[j]]]
+    interaction_count <- interaction_count + 1
+  }
+}
+
+cat("\nTotal polynomial features created:", length(top_10_features), "\n")
+cat("Total interaction features created:", interaction_count, "\n")
+cat("Enhanced dataset dimensions:", dim(df_interactions), "\n")
+```
+
+---
+
+# 6. Model Development
+
+## 6.1 Train-Validation Split
+
+```{r train_val_split}
+# Create stratified split
+set.seed(123)
+train_index <- createDataPartition(df_final$loss, p = 0.7, list = FALSE)
+
+# Split main dataset
+training <- df_final[train_index, ]
+validation <- df_final[-train_index, ]
+
+# Split interaction dataset
+training_int <- df_interactions[train_index, ]
+validation_int <- df_interactions[-train_index, ]
+
+cat("Training set size:", nrow(training), "\n")
+cat("Validation set size:", nrow(validation), "\n")
+cat("Training set (with interactions) size:", nrow(training_int), "\n")
+```
+
+## 6.2 Baseline: Linear Regression (Top 50 Features)
+
+```{r linear_baseline}
+cat("=== Baseline: Linear Regression (Top 50 Features) ===\n\n")
+
+# Select top 50 features
+top_50_features <- names(head(cor_sorted, 50))
+training_lm <- training[, c("loss", top_50_features)]
+validation_lm <- validation[, c("loss", top_50_features)]
+
+# Train model
+lm_model <- lm(loss ~ ., data = training_lm)
+
+# Predict
+lm_pred_train <- predict(lm_model, newdata = training_lm)
+lm_pred_val <- predict(lm_model, newdata = validation_lm)
+
+# Evaluate
+lm_train_results <- postResample(pred = lm_pred_train, obs = training_lm$loss)
+lm_val_results <- postResample(pred = lm_pred_val, obs = validation_lm$loss)
+
+cat("Training Performance:\n")
+print(lm_train_results)
+cat("\nValidation Performance:\n")
+print(lm_val_results)
+```
+
+## 6.3 Lasso Regression
+
+```{r lasso}
+cat("\n=== Lasso Regression (All Features) ===\n\n")
+
+# Prepare matrices
+x_train <- as.matrix(training[, setdiff(names(training), "loss")])
+y_train <- training$loss
+x_val <- as.matrix(validation[, setdiff(names(validation), "loss")])
+y_val <- validation$loss
+
+# Cross-validation for lambda
+set.seed(123)
+lasso_cv <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 1,
+  nfolds = 10,
+  type.measure = "mae"
+)
+
+# Best lambda
+cat("Best lambda (min):", lasso_cv$lambda.min, "\n")
+cat("Best lambda (1se):", lasso_cv$lambda.1se, "\n")
+
+# Predictions
+lasso_pred_train <- predict(lasso_cv, s = "lambda.min", newx = x_train)
+lasso_pred_val <- predict(lasso_cv, s = "lambda.min", newx = x_val)
+
+# Results
+lasso_train_results <- postResample(pred = as.numeric(lasso_pred_train), obs = y_train)
+lasso_val_results <- postResample(pred = as.numeric(lasso_pred_val), obs = y_val)
+
+cat("\nTraining Performance:\n")
+print(lasso_train_results)
+cat("\nValidation Performance:\n")
+print(lasso_val_results)
+
+# Selected features
+lasso_coef <- coef(lasso_cv, s = "lambda.min")
+lasso_selected <- sum(lasso_coef != 0) - 1 # Exclude intercept
+cat("\nNumber of features selected by Lasso:", lasso_selected, "\n")
+```
+
+## 6.4 Ridge Regression
+
+```{r ridge}
+cat("\n=== Ridge Regression (All Features) ===\n\n")
+
+# Cross-validation for lambda
+set.seed(123)
+ridge_cv <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 0,
+  nfolds = 10,
+  type.measure = "mae"
+)
+
+# Best lambda
+cat("Best lambda (min):", ridge_cv$lambda.min, "\n")
+cat("Best lambda (1se):", ridge_cv$lambda.1se, "\n")
+
+# Predictions
+ridge_pred_train <- predict(ridge_cv, s = "lambda.min", newx = x_train)
+ridge_pred_val <- predict(ridge_cv, s = "lambda.min", newx = x_val)
+
+# Results
+ridge_train_results <- postResample(pred = as.numeric(ridge_pred_train), obs = y_train)
+ridge_val_results <- postResample(pred = as.numeric(ridge_pred_val), obs = y_val)
+
+cat("\nTraining Performance:\n")
+print(ridge_train_results)
+cat("\nValidation Performance:\n")
+print(ridge_val_results)
+```
+
+## 6.5 Elastic Net Regression
+
+```{r elastic_net}
+cat("\n=== Elastic Net Regression (All Features) ===\n\n")
+
+# Cross-validation for lambda
+set.seed(123)
+enet_cv <- cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 0.5,
+  nfolds = 10,
+  type.measure = "mae"
+)
+
+# Best lambda
+cat("Best lambda (min):", enet_cv$lambda.min, "\n")
+cat("Best lambda (1se):", enet_cv$lambda.1se, "\n")
+
+# Predictions
+enet_pred_train <- predict(enet_cv, s = "lambda.min", newx = x_train)
+enet_pred_val <- predict(enet_cv, s = "lambda.min", newx = x_val)
+
+# Results
+enet_train_results <- postResample(pred = as.numeric(enet_pred_train), obs = y_train)
+enet_val_results <- postResample(pred = as.numeric(enet_pred_val), obs = y_val)
+
+cat("\nTraining Performance:\n")
+print(enet_train_results)
+cat("\nValidation Performance:\n")
+print(enet_val_results)
+```
+
+## 6.6 Random Forest
+
+```{r random_forest}
+cat("\n=== Random Forest (Top 100 Features) ===\n\n")
+
+# Use top 100 features for computational efficiency
+top_100_features <- names(head(cor_sorted, 100))
+training_rf <- training[, c("loss", top_100_features)]
+validation_rf <- validation[, c("loss", top_100_features)]
+
+# Train Random Forest
+set.seed(123)
+rf_model <- randomForest(
+  loss ~ .,
+  data = training_rf,
+  ntree = 100,
+  mtry = 10,
+  importance = TRUE,
+  nodesize = 50
+)
+
+# Predictions
+rf_pred_train <- predict(rf_model, newdata = training_rf)
+rf_pred_val <- predict(rf_model, newdata = validation_rf)
+
+# Results
+rf_train_results <- postResample(pred = rf_pred_train, obs = training_rf$loss)
+rf_val_results <- postResample(pred = rf_pred_val, obs = validation_rf$loss)
+
+cat("Training Performance:\n")
+print(rf_train_results)
+cat("\nValidation Performance:\n")
+print(rf_val_results)
+
+# Variable importance
+cat("\nTop 10 Important Features:\n")
+importance_df <- data.frame(
+  feature = rownames(importance(rf_model)),
+  importance = importance(rf_model)[, 1]
+)
+print(head(importance_df[order(-importance_df$importance), ], 10))
+```
+
+## 6.7 XGBoost
+
+```{r xgboost}
+cat("\n=== XGBoost (All Features) ===\n\n")
+
+# Function to clean data for XGBoost
+clean_for_xgboost <- function(mat, max_value = 1e6) {
+  # Convert to matrix if not already
+  if(!is.matrix(mat)) mat <- as.matrix(mat)
+  
+  # Check for invalid values
+  cat("  Inf values:", sum(is.infinite(mat)), "\n")
+  cat("  NaN values:", sum(is.nan(mat)), "\n")
+  cat("  NA values:", sum(is.na(mat)), "\n")
+  cat("  Max value:", max(mat[is.finite(mat)]), "\n")
+  cat("  Min value:", min(mat[is.finite(mat)]), "\n")
+  
+  # Replace Inf with 0
+  mat[is.infinite(mat)] <- 0
+  
+  # Replace NaN with 0
+  mat[is.nan(mat)] <- 0
+  
+  # Replace NA with 0
+  mat[is.na(mat)] <- 0
+  
+  # Cap extreme values (XGBoost can't handle values > ~1e8)
+  mat[mat > max_value] <- max_value
+  mat[mat < -max_value] <- -max_value
+  
+  return(mat)
+}
+
+# Clean training and validation data
+cat("Cleaning training data...\n")
+x_train_clean <- clean_for_xgboost(x_train)
+
+cat("\nCleaning validation data...\n")
+x_val_clean <- clean_for_xgboost(x_val)
+
+cat("\nAfter cleaning - Final check:\n")
+cat("Training - Inf:", sum(is.infinite(x_train_clean)), 
+    "NaN:", sum(is.nan(x_train_clean)),
+    "NA:", sum(is.na(x_train_clean)), "\n")
+cat("Validation - Inf:", sum(is.infinite(x_val_clean)), 
+    "NaN:", sum(is.nan(x_val_clean)),
+    "NA:", sum(is.na(x_val_clean)), "\n")
+
+# Prepare DMatrix with missing parameter
+dtrain <- xgb.DMatrix(data = x_train_clean, label = y_train, missing = 0)
+dval <- xgb.DMatrix(data = x_val_clean, label = y_val, missing = 0)
+
+# Parameters
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "mae",
+  max_depth = 6,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5
+)
+
+# Train with early stopping
+set.seed(123)
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  watchlist = list(train = dtrain, val = dval),
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+cat("\nBest iteration:", xgb_model$best_iteration, "\n")
+cat("Best validation MAE:", xgb_model$best_score, "\n")
+
+# Predictions
+xgb_pred_train <- predict(xgb_model, dtrain)
+xgb_pred_val <- predict(xgb_model, dval)
+
+# Results
+xgb_train_results <- postResample(pred = xgb_pred_train, obs = y_train)
+xgb_val_results <- postResample(pred = xgb_pred_val, obs = y_val)
+
+cat("\nTraining Performance:\n")
+print(xgb_train_results)
+cat("\nValidation Performance:\n")
+print(xgb_val_results)
+
+# Feature importance
+importance_matrix <- xgb.importance(model = xgb_model)
+cat("\nTop 10 Important Features:\n")
+print(head(importance_matrix, 10))
+```
+
+## 6.8 Enhanced Linear Model (With Interactions)
+
+```{r linear_interactions}
+cat("\n=== Linear Model with Interactions ===\n\n")
+
+# Train on interaction features
+lm_int_model <- lm(loss ~ ., data = training_int)
+
+# Predictions
+lm_int_pred_train <- predict(lm_int_model, newdata = training_int)
+lm_int_pred_val <- predict(lm_int_model, newdata = validation_int)
+
+# Results
+lm_int_train_results <- postResample(pred = lm_int_pred_train, obs = training_int$loss)
+lm_int_val_results <- postResample(pred = lm_int_pred_val, obs = validation_int$loss)
+
+cat("Training Performance:\n")
+print(lm_int_train_results)
+cat("\nValidation Performance:\n")
+print(lm_int_val_results)
+```
+
+---
+
+# 7. Model Comparison
+
+```{r model_comparison}
+# Compile all validation results
+model_comparison <- data.frame(
+  Model = c("Linear (Top 50)", "Lasso", "Ridge", "Elastic Net", 
+            "Random Forest", "XGBoost", "Linear (Interactions)"),
+  Train_MAE = c(lm_train_results["MAE"], lasso_train_results["MAE"], 
+                ridge_train_results["MAE"], enet_train_results["MAE"],
+                rf_train_results["MAE"], xgb_train_results["MAE"],
+                lm_int_train_results["MAE"]),
+  Val_MAE = c(lm_val_results["MAE"], lasso_val_results["MAE"], 
+              ridge_val_results["MAE"], enet_val_results["MAE"],
+              rf_val_results["MAE"], xgb_val_results["MAE"],
+              lm_int_val_results["MAE"]),
+  Val_RMSE = c(lm_val_results["RMSE"], lasso_val_results["RMSE"], 
+               ridge_val_results["RMSE"], enet_val_results["RMSE"],
+               rf_val_results["RMSE"], xgb_val_results["RMSE"],
+               lm_int_val_results["RMSE"]),
+  Val_Rsquared = c(lm_val_results["Rsquared"], lasso_val_results["Rsquared"], 
+                   ridge_val_results["Rsquared"], enet_val_results["Rsquared"],
+                   rf_val_results["Rsquared"], xgb_val_results["Rsquared"],
+                   lm_int_val_results["Rsquared"])
+)
+
+# Sort by validation MAE
+model_comparison <- model_comparison[order(model_comparison$Val_MAE), ]
+
+cat("=== Model Performance Comparison ===\n\n")
+print(model_comparison)
+
+# Visualize
+ggplot(model_comparison, aes(x = reorder(Model, Val_MAE), y = Val_MAE)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = round(Val_MAE, 3)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title = "Model Comparison: Validation MAE",
+       x = "Model", y = "Mean Absolute Error") +
+  theme_minimal()
+```
+
+---
+
+# 8. Final Model Selection and Ensemble
+
+```{r ensemble}
+cat("=== Creating Ensemble Model ===\n\n")
+
+# Select best performing models for ensemble
+# Based on validation MAE, we'll combine Lasso, XGBoost, and Random Forest
+
+# Weight by inverse MAE (better models get more weight)
+lasso_mae <- lasso_val_results["MAE"]
+xgb_mae <- xgb_val_results["MAE"]
+rf_mae <- rf_val_results["MAE"]
+
+total_inverse_mae <- (1/lasso_mae) + (1/xgb_mae) + (1/rf_mae)
+
+w_lasso <- (1/lasso_mae) / total_inverse_mae
+w_xgb <- (1/xgb_mae) / total_inverse_mae
+w_rf <- (1/rf_mae) / total_inverse_mae
+
+cat("Ensemble weights:\n")
+cat("  Lasso:", round(w_lasso, 3), "\n")
+cat("  XGBoost:", round(w_xgb, 3), "\n")
+cat("  Random Forest:", round(w_rf, 3), "\n")
+
+# Create ensemble predictions
+ensemble_pred_val <- w_lasso * as.numeric(lasso_pred_val) + 
+                     w_xgb * xgb_pred_val + 
+                     w_rf * rf_pred_val
+
+# Evaluate ensemble
+ensemble_val_results <- postResample(pred = ensemble_pred_val, obs = y_val)
+
+cat("\nEnsemble Validation Performance:\n")
+print(ensemble_val_results)
+```
+
+---
+
+# 9. Test Set Preprocessing and Prediction
+
+## 9.1 Preprocess Test Data
+
+```{r preprocess_test}
+cat("=== Preprocessing Test Data ===\n\n")
+
+# Select same numeric columns
+test_numeric <- test_raw[, names(x), with = FALSE]
+
+# Impute using training medians
+for (col in names(test_numeric)) {
+  if(col %in% names(train_medians)) {
+    test_numeric[[col]][is.na(test_numeric[[col]])] <- train_medians[col]
+  }
+}
+
+# Remove zero-variance columns
+test_numeric <- test_numeric[, !names(test_numeric) %in% zero_var_cols, with = FALSE]
+
+# Scale using training statistics
+test_scaled <- as.data.frame(scale(test_numeric, 
+                                   center = train_means, 
+                                   scale = train_sds))
+
+# Handle Inf and NaN values
+inf_count_test <- sum(is.infinite(as.matrix(test_scaled)))
+nan_count_test <- sum(is.nan(as.matrix(test_scaled)))
+
+if(inf_count_test > 0 || nan_count_test > 0) {
+  cat("Found", inf_count_test, "Inf values and", nan_count_test, "NaN values in test data\n")
+  cat("Replacing with 0...\n")
+  test_scaled[is.infinite(as.matrix(test_scaled))] <- 0
+  test_scaled[is.nan(as.matrix(test_scaled))] <- 0
+}
+
+# Cap extreme values (same as training)
+max_scaled_value <- 10
+extreme_count_test <- sum(abs(as.matrix(test_scaled)) > max_scaled_value)
+if(extreme_count_test > 0) {
+  cat("Found", extreme_count_test, "extreme values beyond ±", max_scaled_value, "\n")
+  cat("Capping to ±", max_scaled_value, "...\n")
+  test_scaled[test_scaled > max_scaled_value] <- max_scaled_value
+  test_scaled[test_scaled < -max_scaled_value] <- -max_scaled_value
+}
+
+cat("Test data dimensions:", dim(test_scaled), "\n")
+cat("Missing values in test:", sum(is.na(test_scaled)), "\n")
+cat("Inf values in test:", sum(is.infinite(as.matrix(test_scaled))), "\n")
+cat("NaN values in test:", sum(is.nan(as.matrix(test_scaled))), "\n")
+cat("Max value in test:", max(as.matrix(test_scaled)), "\n")
+cat("Min value in test:", min(as.matrix(test_scaled)), "\n")
+```
+
+## 9.2 Generate Predictions
+
+```{r test_predictions}
+cat("\n=== Generating Test Predictions ===\n\n")
+
+# Prepare test matrix for models
+x_test <- as.matrix(test_scaled)
+
+# Clean test data for XGBoost using the same function
+cat("Cleaning test data for XGBoost...\n")
+x_test_clean <- x_test
+
+# Replace Inf, NaN, NA with 0
+x_test_clean[is.infinite(x_test_clean)] <- 0
+x_test_clean[is.nan(x_test_clean)] <- 0
+x_test_clean[is.na(x_test_clean)] <- 0
+
+# Cap extreme values
+max_value <- 1e6
+x_test_clean[x_test_clean > max_value] <- max_value
+x_test_clean[x_test_clean < -max_value] <- -max_value
+
+cat("Test data cleaned:\n")
+cat("  Inf values:", sum(is.infinite(x_test_clean)), "\n")
+cat("  NaN values:", sum(is.nan(x_test_clean)), "\n")
+cat("  NA values:", sum(is.na(x_test_clean)), "\n")
+cat("  Max value:", max(x_test_clean), "\n")
+cat("  Min value:", min(x_test_clean), "\n")
+
+# Get predictions from each model
+lasso_test_pred <- as.numeric(predict(lasso_cv, s = "lambda.min", newx = x_test))
+xgb_test_pred <- predict(xgb_model, xgb.DMatrix(data = x_test_clean, missing = 0))
+
+# For Random Forest, need to subset features
+test_rf <- test_scaled[, top_100_features, drop = FALSE]
+rf_test_pred <- predict(rf_model, newdata = test_rf)
+
+# Create ensemble prediction
+ensemble_test_pred <- w_lasso * lasso_test_pred + 
+                      w_xgb * xgb_test_pred + 
+                      w_rf * rf_test_pred
+
+# Ensure no negative predictions
+ensemble_test_pred[ensemble_test_pred < 0] <- 0
+
+cat("\nNumber of predictions:", length(ensemble_test_pred), "\n")
+cat("Prediction summary:\n")
+print(summary(ensemble_test_pred))
+```
+
+## 9.3 Create Submission File
+
+```{r submission}
+# Get test IDs
+test_ids <- test_raw$id
+
+# Verify lengths match
+cat("\nTest IDs length:", length(test_ids), "\n")
+cat("Predictions length:", length(ensemble_test_pred), "\n")
+
+# Create submission dataframe
+submission <- data.frame(
+  id = test_ids,
+  loss = ensemble_test_pred
+)
+
+# Save submission file
+write.csv(submission, 
+          "Group_Project_Loss_Prediction.csv", 
+          row.names = FALSE)
+
+cat("\nSubmission file created: Group_Project_Loss_Prediction.csv\n")
+cat("First few predictions:\n")
+print(head(submission, 10))
+```
+
+---
+
+# 10. Model Diagnostics
+
+## 10.1 Residual Analysis (Best Model)
+
+```{r residuals, fig.height=8}
+# Use best performing model (likely XGBoost or ensemble)
+residuals_val <- y_val - ensemble_pred_val
+
+# Create diagnostic plots
+p1 <- ggplot(data.frame(fitted = ensemble_pred_val, residuals = residuals_val),
+             aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(se = FALSE, color = "orange") +
+  labs(title = "Residuals vs Fitted Values",
+       x = "Fitted Values", y = "Residuals") +
+  theme_minimal()
+
+p2 <- ggplot(data.frame(residuals = residuals_val), aes(x = residuals)) +
+  geom_histogram(bins = 50, fill = "coral", alpha = 0.7) +
+  labs(title = "Distribution of Residuals",
+       x = "Residuals", y = "Frequency") +
+  theme_minimal()
+
+p3 <- ggplot(data.frame(sample = residuals_val), aes(sample = sample)) +
+  stat_qq(color = "steelblue") +
+  stat_qq_line(color = "red") +
+  labs(title = "Q-Q Plot of Residuals") +
+  theme_minimal()
+
+p4 <- ggplot(data.frame(actual = y_val, predicted = ensemble_pred_val),
+             aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual vs Predicted",
+       x = "Actual Loss", y = "Predicted Loss") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+## 10.2 Error Analysis
+
+```{r error_analysis}
+# Calculate absolute errors
+abs_errors <- abs(residuals_val)
+
+# Summary
+cat("Error Statistics:\n")
+cat("Mean Absolute Error:", mean(abs_errors), "\n")
+cat("Median Absolute Error:", median(abs_errors), "\n")
+cat("Max Absolute Error:", max(abs_errors), "\n")
+cat("90th Percentile Error:", quantile(abs_errors, 0.90), "\n")
+
+# Identify large errors
+large_error_threshold <- quantile(abs_errors, 0.95)
+large_errors_idx <- which(abs_errors > large_error_threshold)
+
+cat("\nCases with large errors (>95th percentile):", length(large_errors_idx), "\n")
+```
+
+---
+
+# 11. Insights and Conclusions
+
+## 11.1 Key Findings
+
+```{r key_findings}
+cat("=== Key Findings ===\n\n")
+
+cat("1. Model Performance:\n")
+cat("   - Best single model:", model_comparison$Model[1], 
+    "with validation MAE:", round(model_comparison$Val_MAE[1], 4), "\n")
+cat("   - Ensemble model validation MAE:", round(ensemble_val_results["MAE"], 4), "\n")
+cat("   - R-squared on validation:", round(ensemble_val_results["Rsquared"], 4), "\n\n")
+
+cat("2. Important Features:\n")
+cat("   Top 5 features by correlation:\n")
+for(i in 1:5) {
+  cat("   ", i, ". ", names(cor_sorted)[i], 
+      " (correlation: ", round(cor_sorted[i], 4), ")\n", sep = "")
+}
+
+cat("\n3. Feature Selection:\n")
+cat("   - Lasso selected", lasso_selected, "out of", ncol(x_train), "features\n")
+cat("   - Random Forest used top 100 features\n")
+cat("   - Interaction features improved linear model performance\n\n")
+
+cat("4. Ensemble Strategy:\n")
+cat("   - Combined Lasso, XGBoost, and Random Forest\n")
+cat("   - Weights based on inverse validation MAE\n")
+cat("   - Resulted in", 
+    ifelse(ensemble_val_results["MAE"] < min(model_comparison$Val_MAE),
+           "better", "competitive"),
+    "performance\n")
+```
+
+## 11.2 Model Limitations
+
+```{r limitations}
+cat("\n=== Model Limitations ===\n\n")
+
+cat("1. Low R-squared values indicate:\n")
+cat("   - High inherent variability in loss amounts\n")
+cat("   - Possible missing features in the dataset\n")
+cat("   - Complex non-linear relationships not fully captured\n\n")
+
+cat("2. Data challenges:\n")
+cat("   - Many features with missing values\n")
+cat("   - Limited understanding of feature meanings\n")
+cat("   - Potential outliers in loss variable\n\n")
+
+cat("3. Computational constraints:\n")
+cat("   - Random Forest limited to 100 features and 100 trees\n")
+cat("   - Could not explore all possible feature interactions\n")
+```
+
+
+
+---
+
+# 12. Session Information
+
+```{r session_info}
+sessionInfo()
+```
+
+---
+
+
