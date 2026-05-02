@@ -26,7 +26,7 @@ set.seed(123)
 
 Loading Gabriel's cleaned train and test datasets
 ```{r}
-## Set your own working drive
+## Set your working directory
 train <- read.csv("train_clean_final.csv")
 test <- read.csv("test_clean_final.csv")
 ```
@@ -88,10 +88,59 @@ cv_mse
 
 Finding best k
 ```{r}
-best_k <- which.min(cv_mse)
+best_k <- which.min(cv_mse) - 1
 best_k
 min(cv_mse)
 ```
+
+---
+## PLS Component Datasets - CSV Files
+These CSV files transform the original predictor space into the six selected PLS components. These components can be used for follow-up modeling, such as testing whether Random Forest performs differently on the compressed PLS representation compared with the LASSO-selected feature set.
+
+Create PLS component dataset for training partition
+```{r}
+pls_train_components <- as.data.frame(pls_model$scores[, 1:best_k])
+colnames(pls_train_components) <- paste0("Comp", 1:best_k)
+pls_train_components$loss <- training_pls$loss
+
+write.csv(pls_train_components, "pls_train_components.csv", row.names = FALSE)
+```
+
+Create PLS component dataset for validation partition
+```{r}
+pls_val_components <- predict(
+  pls_model,
+  newdata = validation_pls,
+  ncomp = 1:best_k,
+  type = "scores"
+)
+
+pls_val_components <- as.data.frame(pls_val_components[, 1:best_k])
+colnames(pls_val_components) <- paste0("Comp", 1:best_k)
+
+pls_val_components$loss <- validation_pls$loss
+
+write.csv(pls_val_components, "pls_validation_components.csv", row.names = FALSE)
+```
+
+Create PLS component dataset for test partition
+```{r}
+test_pls <- test[, !names(test) %in% nzv]
+
+pls_test_components <- predict(
+  pls_model,
+  newdata = test_pls,
+  ncomp = 1:best_k,
+  type = "scores"
+)
+
+pls_test_components <- as.data.frame(pls_test_components[, 1:best_k])
+colnames(pls_test_components) <- paste0("Comp", 1:best_k)
+
+write.csv(pls_test_components, "pls_test_components.csv", row.names = FALSE)
+```
+
+---
 
 Evaluating MAE on the validation set 
 ```{r}
