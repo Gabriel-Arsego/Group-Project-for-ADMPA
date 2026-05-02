@@ -1,0 +1,264 @@
+---
+title: "Comparison of Feature Selection Across Models"
+author: "Kight Pruszynski"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+I was curious if any of the models favored the same features, especially since all models returned very similar MAEs. Because not all models perform feature selection directly, I used a comparison approach to identify features that appeared across multiple methods. The models evaluated were linear regression, LASSO, ridge, elastic net, and PLS. I prompted generative AI to help generate code for this comparison.
+
+No features were prioritized across all models. However, 18 features were consistently identified across LASSO, Ridge, and Elastic Net: f111, f218, f221, f313, f383, f384, f398, f413, f471, f526, f533, f536, f615, f663, f673, f674, f775, and f80. Only five features (f113, f145, f199, f300, f720) were selected by LASSO alone.
+
+Linear regression and PLS did not show overlap with other models. Linear regression appears to be unstable for feature ranking in this dataset, likely due to high feature correlation affecting coefficient estimates. PLS, on the other hand, constructs components from combinations of variables, so its notion of feature importance is not directly comparable to models that select features based on individual performance. While none of the top 20 features contributing to the six selected PLS components overlapped with the other models, this likely reflects a difference in how importance is distributed across combinations of variables rather than individual predictors.
+
+It may be worthwhile to apply predictive analytics to both the LASSO and PLS data sets independently. They could both reveal important insight. 
+
+If we had more time, it would be worth exploring other loss functions or ways of evaluating feature importance.
+
+---
+
+Loading libraries
+```{r}
+library(caret)    # data splitting + nearZeroVar
+library(glmnet)   # LASSO, Ridge, Elastic Net
+library(pls)      # PLS model
+library(dplyr)    # Cleaner data manipulation
+library(ggplot2)  # Nicer plots
+```
+
+Set seed
+```{r}
+set.seed(123)
+```
+
+Loading Gabriel's cleaned train and test datasets
+```{r}
+## Set your own working directory
+train <- read.csv("train_clean_final.csv")
+test <- read.csv("test_clean_final.csv")
+```
+
+Creating training and validation partitions
+```{r}
+index <- createDataPartition(train$loss, p = 0.7, list = FALSE)
+
+training <- train[index, ]
+validation <- train[-index, ]
+```
+
+Removing near-zero variance features
+```{r}
+# Identify near-zero variance features from the training partition only
+nzv <- nearZeroVar(training[, names(training) != "loss"], names = TRUE)
+
+# Remove near-zero variance features from both training and validation
+training_comp <- training[, !names(training) %in% nzv]
+validation_comp <- validation[, !names(validation) %in% nzv]
+
+dim(training_comp)
+dim(validation_comp)
+```
+
+Defining train and validate partitions
+```{r}
+# Define predictor matrices and target vectors for model comparison
+x_train <- as.matrix(training_comp[, names(training_comp) != "loss"])
+y_train <- training_comp$loss
+
+x_val <- as.matrix(validation_comp[, names(validation_comp) != "loss"])
+y_val <- validation_comp$loss
+```
+
+Models for comparison
+```{r}
+# --- Fit models for comparison ---
+
+# LASSO
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, type.measure = "mae")
+
+# Ridge
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0, type.measure = "mae")
+
+# Elastic Net already defined later (you can leave it or move it here)
+
+# Linear Regression
+lm_model <- lm(loss ~ ., data = training_comp)
+
+# PLS
+pls_model <- plsr(
+  loss ~ .,
+  data = training_comp,
+  ncomp = 10,
+  scale = FALSE,
+  validation = "CV"
+)
+
+# Find best_k for PLS
+msep <- MSEP(pls_model, estimate = "CV")
+cv_mse <- as.vector(msep$val[1, 1, ])
+best_k <- which.min(cv_mse)
+```
+
+Compare LASSO and Elastic Net 
+```{r}
+# LASSO
+lasso_coef <- coef(cv_lasso, s = "lambda.min")
+lasso_features <- rownames(lasso_coef)[lasso_coef[,1] != 0]
+lasso_features <- lasso_features[lasso_features != "(Intercept)"]
+
+# Elastic Net (example alpha = 0.5)
+cv_enet <- cv.glmnet(x_train, y_train, alpha = 0.5, type.measure = "mae")
+enet_coef <- coef(cv_enet, s = "lambda.min")
+enet_features <- rownames(enet_coef)[enet_coef[,1] != 0]
+enet_features <- enet_features[enet_features != "(Intercept)"]
+
+# Overlap
+intersect(lasso_features, enet_features)
+```
+
+Ridge feature importance
+```{r}
+ridge_coef <- coef(cv_ridge, s = "lambda.min")
+ridge_top <- names(sort(abs(ridge_coef[,1]), decreasing = TRUE))[1:20]
+```
+
+PLS importance via loadings
+```{r}
+loadings <- pls_model$loadings[, 1:best_k]
+importance <- rowSums(abs(loadings))
+pls_top <- names(sort(importance, decreasing = TRUE))[1:20]
+```
+
+Top linear regression features by coefficient magnitude
+```{r}
+coefs <- coef(lm_model)
+lm_top <- names(sort(abs(coefs), decreasing = TRUE))[1:20]
+lm_top <- lm_top[lm_top != "(Intercept)"]
+```
+
+Comparing important features - LASSO, Elastic Net, Ridge, and PLS
+```{r}
+common <- Reduce(intersect, list(lasso_features, enet_features, ridge_top, pls_top))
+common
+```
+
+Comparing important features - LASSO, Elastic Net, Ridge, PLS, and Linear Regression
+```{r}
+common <- Reduce(intersect, list(lasso_features, enet_features, ridge_top, pls_top, lm_top))
+common
+```
+
+Finding important features that show up in three or more models
+```{r}
+all_features <- c(
+  lasso_features,
+  enet_features,
+  ridge_top,
+  pls_top,
+  lm_top
+)
+
+
+
+feature_counts <- sort(table(all_features), decreasing = TRUE)
+feature_counts <- feature_counts[names(feature_counts) != "(Intercept)"]
+feature_counts
+
+feature_counts[feature_counts >= 3]
+```
+
+Visual model of shared features
+```{r}
+barplot(feature_counts[feature_counts >= 2],
+        las = 2,
+        main = "Feature Importance Frequency Across Models")
+```
+
+Finding important features that show up in four or more models
+```{r}
+all_features <- c(
+  lasso_features,
+  enet_features,
+  ridge_top,
+  pls_top,
+  lm_top
+)
+
+
+
+feature_counts <- sort(table(all_features), decreasing = TRUE)
+feature_counts <- feature_counts[names(feature_counts) != "(Intercept)"]
+feature_counts
+
+feature_counts[feature_counts >= 4]
+```
+
+Discovering which features selected by LASSO are also prioritized in two or more other models
+```{r}
+other_models <- c(enet_features, ridge_top, pls_top, lm_top)
+lasso_overlap_counts <- table(other_models[other_models %in% lasso_features])
+lasso_stable <- names(lasso_overlap_counts[lasso_overlap_counts >= 2])
+lasso_stable
+```
+
+Features selected by LASSO but only one other model
+```{r}
+# All LASSO features
+lasso_all <- lasso_features
+
+# Features that appear in >= 2 other models
+lasso_stable <- names(lasso_overlap_counts[lasso_overlap_counts >= 2])
+
+# LASSO features NOT supported by >=2 other models
+lasso_unique_1 <- setdiff(lasso_all, lasso_stable)
+
+lasso_unique_1
+```
+Features selected by LASSO but not any other models
+```{r}
+# All LASSO features
+lasso_all <- lasso_features
+
+# Features that appear in >= 2 other models
+lasso_stable <- names(lasso_overlap_counts[lasso_overlap_counts >= 1])
+
+# LASSO features NOT supported by >=2 other models
+lasso_unique_0 <- setdiff(lasso_all, lasso_stable)
+
+lasso_unique_0
+```
+
+Discovering which features used by PLS are also prioritized in two or more other models
+```{r}
+# Combine non-PLS model feature lists
+other_model_features <- c(
+  lasso_features,
+  enet_features,
+  ridge_top,
+  lm_top
+)
+
+# Count how often each PLS top feature appears in the other models
+pls_overlap_counts <- table(other_model_features[other_model_features %in% pls_top])
+
+pls_overlap_counts
+```
+
+```{r}
+head(pls_top)
+head(lasso_features)
+```
+
+Determining which features are selected by both LASSO and each of the other models
+```{r}
+intersect(lasso_features, enet_features)
+intersect(lasso_features, ridge_top)
+intersect(lasso_features, pls_top)
+intersect(lasso_features, lm_top)
+```
