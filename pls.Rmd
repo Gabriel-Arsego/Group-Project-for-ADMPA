@@ -1,0 +1,141 @@
+---
+title: "Group Project - PLS"
+author: "Kight Pruszynski"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Here I ran Partial Least Squares (PLS) on Gabriel's cleaned test and train datasets. I first removed near-zero variance features. After running PLS, I ran LASSO on the same validation partition as I ran PLS. I confirmed that LASSO has a slightly smaller MAE (1.429241) than PLS (1.431488). PLS was still helpful as a dimensionality-reduction comparison because instead of picking individual features, it grouped them into 6 components that capture the main patterns related to the target.
+
+LASSO continues to perform the best for dimensionality reduction, having stood up to Gabriel's Ridge, Elastic Net, and linear regression evaluations, as well as my PLS. The differences in MAE are small, suggesting all methods capture similar predictive signal, likely due to redundancy among features. This suggests diminishing returns for increased model complexity. 
+
+---
+
+Loading pls and caret libraries
+```{r}
+library(pls)
+library(caret)
+
+set.seed(123)
+```
+
+Loading Gabriel's cleaned train and test datasets
+```{r}
+## Set your own working drive
+train <- read.csv("train_clean_final.csv")
+test <- read.csv("test_clean_final.csv")
+```
+
+Confirming there are no missing values
+```{r}
+sum(is.na(train))
+sum(is.na(test))
+names(train)[!sapply(train, is.numeric)]
+names(test)[!sapply(test, is.numeric)]
+```
+Confirming the first column is loss
+```{r}
+names(train)[1]
+"loss" %in% names(train)
+```
+
+Creating training and validation partitions
+```{r}
+index <- createDataPartition(train$loss, p = 0.7, list = FALSE)
+
+training <- train[index, ]
+validation <- train[-index, ]
+```
+
+Identify near-zero variance features
+```{r}
+nzv <- nearZeroVar(training[, names(training) != "loss"], names = TRUE)
+length(nzv)
+nzv
+```
+
+Removing near-zero variance features
+```{r}
+training_pls <- training[, !names(training) %in% nzv]
+validation_pls <- validation[, !names(validation) %in% nzv]
+
+dim(training_pls)
+dim(validation_pls)
+```
+
+Creating the PLS model (with max of 20)
+```{r}
+pls_model <- plsr(
+  loss ~ .,
+  data = training_pls,
+  ncomp = 20,
+  scale = FALSE,
+  validation = "CV"
+)
+```
+
+CV MSE
+```{r}
+msep <- MSEP(pls_model, estimate = "CV")
+cv_mse <- as.vector(msep$val[1, 1, ])
+cv_mse
+```
+
+Finding best k
+```{r}
+best_k <- which.min(cv_mse)
+best_k
+min(cv_mse)
+```
+
+Evaluating MAE on the validation set 
+```{r}
+pls_pred <- predict(pls_model, newdata = validation_pls, ncomp = best_k)
+
+pls_mae <- mean(abs(validation_pls$loss - as.numeric(pls_pred)))
+pls_mae
+```
+
+Confirming model stability with a smaller max (10)
+```{r}
+pls_model_10 <- plsr(
+  loss ~ .,
+  data = training_pls,
+  ncomp = 10,
+  scale = FALSE,
+  validation = "CV"
+)
+
+msep_10 <- MSEP(pls_model_10, estimate = "CV")
+cv_mse_10 <- as.vector(msep_10$val[1, 1, ])
+
+which.min(cv_mse_10)
+min(cv_mse_10)
+```
+
+The optimal number of PLS components was consistently identified as 6, even when the maximum number of components was reduced from 20 to 10. This means the model is stable and not sensitive to the maximum component parameter. 
+
+Comparing PLS MAE with LASSO MAE
+```{r}
+library(glmnet)
+
+x_train <- as.matrix(training_pls[, names(training_pls) != "loss"])
+y_train <- training_pls$loss
+
+x_val <- as.matrix(validation_pls[, names(validation_pls) != "loss"])
+y_val <- validation_pls$loss
+
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, type.measure = "mae")
+
+lasso_pred <- predict(cv_lasso, s = "lambda.min", newx = x_val)
+
+lasso_mae <- mean(abs(y_val - as.numeric(lasso_pred)))
+lasso_mae
+```
+
+LASSO has a slightly lower MAE (1.429241) than PLS (1.431488).
