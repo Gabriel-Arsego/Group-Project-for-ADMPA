@@ -44,6 +44,12 @@ train <- read.csv("train_clean_final.csv")
 test <- read.csv("test_clean_final.csv")
 ```
 
+Removing id columns
+```{r}
+train <- train[, !names(train) %in% c("V1", "id")]
+test  <- test[,  !names(test)  %in% c("V1", "id")]
+```
+
 Creating training and validation partitions
 ```{r}
 index <- createDataPartition(train$loss, p = 0.7, list = FALSE)
@@ -85,24 +91,19 @@ cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, type.measure = "mae")
 # Ridge
 cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0, type.measure = "mae")
 
-# Elastic Net already defined later (you can leave it or move it here)
+# Elastic Net 
+cv_enet <- cv.glmnet(x_train, y_train, alpha = 0.5, type.measure = "mae")
 
 # Linear Regression
 lm_model <- lm(loss ~ ., data = training_comp)
 
 # PLS
-pls_model <- plsr(
-  loss ~ .,
-  data = training_comp,
-  ncomp = 10,
-  scale = FALSE,
-  validation = "CV"
-)
+pls_model <- plsr(loss ~ ., data = training_comp, ncomp = 10, scale = FALSE, validation = "CV")
 
 # Find best_k for PLS
 msep <- MSEP(pls_model, estimate = "CV")
 cv_mse <- as.vector(msep$val[1, 1, ])
-best_k <- which.min(cv_mse)
+best_k <- which.min(cv_mse) - 1
 ```
 
 Compare LASSO and Elastic Net 
@@ -113,7 +114,6 @@ lasso_features <- rownames(lasso_coef)[lasso_coef[,1] != 0]
 lasso_features <- lasso_features[lasso_features != "(Intercept)"]
 
 # Elastic Net (example alpha = 0.5)
-cv_enet <- cv.glmnet(x_train, y_train, alpha = 0.5, type.measure = "mae")
 enet_coef <- coef(cv_enet, s = "lambda.min")
 enet_features <- rownames(enet_coef)[enet_coef[,1] != 0]
 enet_features <- enet_features[enet_features != "(Intercept)"]
@@ -130,7 +130,7 @@ ridge_top <- names(sort(abs(ridge_coef[,1]), decreasing = TRUE))[1:20]
 
 PLS importance via loadings
 ```{r}
-loadings <- pls_model$loadings[, 1:best_k]
+loadings <- pls_model$loadings[, 1:best_k, drop = FALSE]
 importance <- rowSums(abs(loadings))
 pls_top <- names(sort(importance, decreasing = TRUE))[1:20]
 ```
@@ -262,3 +262,34 @@ intersect(lasso_features, ridge_top)
 intersect(lasso_features, pls_top)
 intersect(lasso_features, lm_top)
 ```
+MAE for all methods
+```{r}
+# LASSO
+lasso_pred <- predict(cv_lasso, s = "lambda.min", newx = x_val)
+lasso_mae <- mean(abs(y_val - as.numeric(lasso_pred)))
+
+# Ridge
+ridge_pred <- predict(cv_ridge, s = "lambda.min", newx = x_val)
+ridge_mae <- mean(abs(y_val - as.numeric(ridge_pred)))
+
+# Elastic Net
+enet_pred <- predict(cv_enet, s = "lambda.min", newx = x_val)
+enet_mae <- mean(abs(y_val - as.numeric(enet_pred)))
+
+# Linear Regression - unstable due to multicollinearity
+lm_pred <- predict(lm_model, newdata = validation_comp)
+lm_mae <- mean(abs(y_val - lm_pred), na.rm = TRUE)
+
+# PLS
+pls_pred <- predict(pls_model, newdata = validation_comp, ncomp = best_k)
+pls_mae <- mean(abs(y_val - as.numeric(pls_pred)))
+
+# Summary
+mae_results <- data.frame(
+  Model = c("LASSO", "Ridge", "Elastic Net", "PLS"),
+  MAE = c(lasso_mae, ridge_mae, enet_mae, pls_mae)
+)
+
+mae_results
+```
+
